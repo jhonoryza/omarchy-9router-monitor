@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "id": "jhonoryza.9router",
+  "name": "9Router Monitor",
+  "version": "1.0.0",
+  "author": "jhonoryza",
+  "license": "MIT",
+  "description": "Navbar pill for the 9Router dashboard: pulses while a model request is in flight, shows the last-used model when idle, and handles dashboard login (with a password prompt UI) when the session expires.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "9Router Monitor",
+    "description": "Live model-request indicator for the 9Router dashboard",
+    "category": "Status",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "baseUrl": "http://localhost:20128",
+      "refreshSeconds": 5,
+      "showModelLabel": true,
+      "rememberPassword": true
+    },
+    "schema": [
+      {
+        "key": "baseUrl",
+        "type": "string",
+        "label": "Dashboard base URL",
+        "defaultValue": "http://localhost:20128",
+        "description": "Scheme + host + port of the 9Router dashboard, without a trailing slash."
+      },
+      {
+        "key": "refreshSeconds",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 2,
+        "max": 120,
+        "step": 1,
+        "defaultValue": 5,
+        "description": "How often to ask the dashboard for active and recent model requests."
+      },
+      {
+        "key": "showModelLabel",
+        "type": "boolean",
+        "label": "Show model name in the bar",
+        "defaultValue": true,
+        "description": "Off leaves only the activity dot, for a narrower pill."
+      },
+      {
+        "key": "rememberPassword",
+        "type": "boolean",
+        "label": "Remember dashboard password",
+        "defaultValue": true,
+        "description": "Keeps the dashboard password in the login keyring so an expired session re-authenticates on its own. Off means typing it again every time the session expires."
+      }
+    ]
+  },
+  "homepage": "https://github.com/jhonoryza/omarchy-9router-monitor"
+}
