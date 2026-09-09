@@ -23,6 +23,13 @@ BarWidget {
   readonly property string pluginId: "jhonoryza.9router"
   readonly property bool showLabel: setting("showModelLabel", true) === true
     || String(setting("showModelLabel", "true")) === "true"
+  // Fixed pill width in spacing units so the bar never shifts when the
+  // model name changes length. The label elides inside it; the full name
+  // stays visible in the tooltip and the panel.
+  readonly property int pillWidth: {
+    var w = parseInt(setting("pillWidth", 200), 10)
+    return isFinite(w) ? Math.max(120, Math.min(400, w)) : 200
+  }
   property var svc: null
 
   function bindService() {
@@ -106,7 +113,8 @@ BarWidget {
     // "kr/claude-sonnet-4.5" -> "claude-sonnet-4.5"; keep it bar-sized.
     var slash = name.lastIndexOf("/")
     if (slash >= 0) name = name.slice(slash + 1)
-    if (name.length > 22) name = name.slice(0, 21) + "…"
+    // Length is NOT capped: the fixed-width pill marquees overflowing
+    // text instead of cutting it.
     return name
   }
 
@@ -122,18 +130,18 @@ BarWidget {
     return "no requests yet"
   }
 
-  // Rainbow flow while busy: hue loops 0->1 (red->red, so the wrap is
-  // seamless) and the label color follows it. Saturation/lightness picked
-  // to stay readable on a dark bar.
+  // Muted rainbow flow while busy: hue loops 0->1 (red->red, so the wrap
+  // is seamless). Kept pastel and calm — low saturation, high lightness —
+  // so it reads as an ambient glow rather than a flashing alert.
   property real flowHue: 0
-  readonly property color flowColor: Qt.hsla(root.flowHue, 0.75, 0.62, 1.0)
+  readonly property color flowColor: Qt.hsla(root.flowHue, 0.38, 0.68, 1.0)
 
   NumberAnimation on flowHue {
     running: root.busy
     loops: Animation.Infinite
     from: 0
     to: 1
-    duration: 3500
+    duration: 6000
     easing.type: Easing.Linear
   }
 
@@ -252,15 +260,17 @@ BarWidget {
     bar: root.bar
     // Equalizer backdrop: one dancing bar per slot, painted behind the
     // label. Visible only while busy; idle keeps the clean flat pill.
+    // Deliberately subtle: low opacity, capped height, pastel fill — an
+    // ambient shimmer, not a strobe.
     Row {
       anchors.fill: parent
       anchors.leftMargin: 4
       anchors.rightMargin: 4
-      anchors.topMargin: 5
-      anchors.bottomMargin: 5
+      anchors.topMargin: 7
+      anchors.bottomMargin: 7
       spacing: 2
       visible: root.busy
-      opacity: 0.5
+      opacity: 0.28
 
       Repeater {
         model: root.eqCount
@@ -269,24 +279,25 @@ BarWidget {
           required property int index
           width: Math.max(1, (parent.width - (root.eqCount - 1) * 2) / root.eqCount)
           // Anchor grows from the bottom: tall bars rise, short bars sink.
+          // Capped at 70% so bars stay a backdrop and never touch the text.
           anchors.bottom: parent.bottom
-          height: parent.height * (index < root.eqLevels.length ? root.eqLevels[index] : 0.15)
+          height: parent.height * 0.7 * (index < root.eqLevels.length ? root.eqLevels[index] : 0.15)
           radius: width / 2
           color: root.flowColor
 
           Behavior on height {
-            NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+            NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
           }
         }
       }
     }
 
     text: root.buttonText
-    // The built-in label cannot do bold or outline, and it sizes the slot —
-    // keep it for sizing (implicitWidth still counts while invisible) while
-    // boldLabel below does the actual painting.
+    // The built-in label cannot do bold or outline — hide it and let
+    // boldLabel own both sizing reference and painting inside the fixed
+    // slot below.
     labelVisible: false
-    fixedWidth: root.vertical ? -1 : (boldLabel.implicitWidth + scaledHorizontalMargin * 2)
+    fixedWidth: root.vertical ? -1 : Style.spaceReal(root.pillWidth)
     fontSize: Style.font.caption
     tooltipText: root.tooltipText
     horizontalMargin: 6
@@ -302,30 +313,71 @@ BarWidget {
     }
 
     // Bold copy of the label with a bar-background outline, so the text
-    // stays on top of the dancing equalizer behind it. Anchored exactly
-    // like the built-in label it replaces (centerIn + same size).
-    Text {
-      id: boldLabel
-      anchors.centerIn: parent
-      textFormat: Text.PlainText
-      text: root.buttonText
-      color: button.active && button.useActiveColor ? button.activeColor : button.foreground
-      font.family: button.fontFamily
-      font.pixelSize: button.fontSize
-      font.bold: false
-      style: Text.Outline
-      styleColor: root.bar ? root.bar.background : Color.background
-      renderType: Text.NativeRendering
-      horizontalAlignment: Text.AlignHCenter
-      verticalAlignment: Text.AlignVCenter
+    // stays on top of the dancing equalizer behind it. A clipped viewport
+    // the width of the fixed slot; overflowing text marquees back and
+    // forth, short text sits still and centered.
+    Item {
+      id: marqueeClip
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.leftMargin: button.scaledHorizontalMargin
+      anchors.rightMargin: button.scaledHorizontalMargin
+      anchors.verticalCenter: parent.verticalCenter
+      height: boldLabel.implicitHeight
+      clip: true
+
+      readonly property bool needsScroll: boldMetrics.implicitWidth > width + 1
+
+      Text {
+        id: boldLabel
+        height: parent.height
+        textFormat: Text.PlainText
+        text: root.buttonText
+        x: marqueeClip.needsScroll ? -marqueeClip.scrollPos : (marqueeClip.width - implicitWidth) / 2
+        color: button.active && button.useActiveColor ? button.activeColor : button.foreground
+        font.family: button.fontFamily
+        font.pixelSize: button.fontSize
+        font.bold: false
+        style: Text.Outline
+        styleColor: root.bar ? root.bar.background : Color.background
+        renderType: Text.NativeRendering
+        verticalAlignment: Text.AlignVCenter
+      }
+
+      // Off-screen measure of the full text in the same font.
+      Text {
+        id: boldMetrics
+        visible: false
+        textFormat: Text.PlainText
+        text: root.buttonText
+        font.family: button.fontFamily
+        font.pixelSize: button.fontSize
+      }
+
+      // Ping-pong driver: rest left, glide right, rest right, glide back.
+      // Duration scales with overflow so long names do not race.
+      property real scrollPos: 0
+      property int scrollRange: Math.max(0, Math.round(boldMetrics.implicitWidth - width))
+      property int scrollMs: Math.max(1800, Math.min(6000, scrollRange * 35))
+
+      SequentialAnimation on scrollPos {
+        running: marqueeClip.needsScroll
+        loops: Animation.Infinite
+        PauseAnimation { duration: 1400 }
+        NumberAnimation { to: marqueeClip.scrollRange; duration: marqueeClip.scrollMs; easing.type: Easing.InOutQuad }
+        PauseAnimation { duration: 1400 }
+        NumberAnimation { to: 0; duration: marqueeClip.scrollMs; easing.type: Easing.InOutQuad }
+      }
+      onNeedsScrollChanged: if (!needsScroll) scrollPos = 0
     }
 
-    // Gentle breathing under the color flow while traffic runs.
+    // Soft breathing under the color flow while traffic runs — shallow so
+    // it feels alive without flashing.
     SequentialAnimation on opacity {
       running: root.busy
       loops: Animation.Infinite
-      NumberAnimation { to: 0.7; duration: 600; easing.type: Easing.InOutQuad }
-      NumberAnimation { to: 1.0; duration: 600; easing.type: Easing.InOutQuad }
+      NumberAnimation { to: 0.85; duration: 900; easing.type: Easing.InOutQuad }
+      NumberAnimation { to: 1.0; duration: 900; easing.type: Easing.InOutQuad }
     }
   }
 

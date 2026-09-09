@@ -71,13 +71,13 @@ Item {
   readonly property string keyringService: "omarchy-9router"
   readonly property string keyringAccount: "dashboard-password"
 
-  signal stateChanged()
+  signal dataChanged()
 
   function singleLine(value, limit) {
     return String(value || "").replace(/[\r\n\t]+/g, " ").slice(0, limit)
   }
 
-  function emitChanged() { root.stateChanged() }
+  function emitChanged() { root.dataChanged() }
 
   function applySnapshot(raw) {
     var text = String(raw || "").trim()

@@ -26,6 +26,8 @@ requests, recent models, and dashboard login when the session expires.
   the login keyring (`secret-tool`) for silent auto re-login. The password
   travels over process stdin, never argv; cookies live `0600` under
   `~/.local/state/omarchy/9router/`.
+- **Fixed-width pill with marquee** — the pill never shifts the bar;
+  long model names scroll back and forth, short ones sit centered.
 - **Click actions** — left: panel · right: open dashboard · middle: refresh.
 
 ## Requirements
@@ -77,6 +79,7 @@ secret-tool clear service omarchy-9router account dashboard-password  # remember
 | `baseUrl`          | `http://localhost:20128`| Dashboard scheme + host + port, no trailing slash    |
 | `refreshSeconds`   | `5`                     | Heartbeat poll interval (stream carries live updates)|
 | `showModelLabel`   | `true`                  | `false` leaves only the status dot                   |
+| `pillWidth`        | `200`                   | Fixed pill width (120-400); long names marquee inside |
 | `rememberPassword` | `true`                  | Store password in keyring for auto re-login          |
 
 ## License

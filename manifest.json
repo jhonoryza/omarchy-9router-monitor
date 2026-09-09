@@ -24,7 +24,8 @@
       "baseUrl": "http://localhost:20128",
       "refreshSeconds": 5,
       "showModelLabel": true,
-      "rememberPassword": true
+      "rememberPassword": true,
+      "pillWidth": 200
     },
     "schema": [
       {
@@ -57,6 +58,16 @@
         "label": "Remember dashboard password",
         "defaultValue": true,
         "description": "Keeps the dashboard password in the login keyring so an expired session re-authenticates on its own. Off means typing it again every time the session expires."
+      },
+      {
+        "key": "pillWidth",
+        "type": "integer",
+        "label": "Pill width",
+        "min": 120,
+        "max": 400,
+        "step": 10,
+        "defaultValue": 200,
+        "description": "Fixed pill width in spacing units. Long model names elide inside it so the bar never shifts."
       }
     ]
   },
