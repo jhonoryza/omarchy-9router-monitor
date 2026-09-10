@@ -40,6 +40,17 @@ import urllib.parse
 import urllib.request
 
 TIMEOUT = 12
+# Hard ceiling for any single dashboard reply (JSON bodies, error bodies,
+# login replies). A compromised or faulty server must not be able to grow
+# this process's memory without bound.
+MAX_RESPONSE_BYTES = 512 * 1024
+# Read timeout for the SSE stream: comfortably wider than the server's
+# 25s keepalive ping, so quiet periods look like quiet periods, not stalls.
+STREAM_TIMEOUT = 45
+# Cap collection sizes and text lengths before anything reaches QML state.
+MAX_ACTIVE_ENTRIES = 16
+MAX_RECENT_ENTRIES = 20
+MAX_TEXT_CHARS = 120
 COOKIE_DIR = os.path.join(
     os.environ.get("XDG_STATE_HOME", os.path.join(os.path.expanduser("~"), ".local", "state")),
     "omarchy",
@@ -53,14 +64,65 @@ def fail(reason):
     sys.stdout.flush()
 
 
-def build_opener():
+class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Redirect policy: same origin only.
+
+    The cookie jar authenticates the configured dashboard origin; following
+    a redirect to any other host would leak that auth context and hand a
+    server control over where responses come from. Cross-origin hops are
+    refused; same-origin hops follow as normal.
+    """
+
+    def __init__(self, origin):
+        super().__init__()
+        self.origin = origin  # (scheme, netloc)
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parts = urllib.parse.urlparse(newurl)
+        if (parts.scheme, parts.netloc) != self.origin:
+            raise urllib.error.HTTPError(
+                newurl, code, "cross-origin redirect blocked by policy", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def read_bounded(resp, limit=MAX_RESPONSE_BYTES):
+    """Read a response body with a hard byte ceiling.
+
+    Pre-checks Content-Length when declared, then streams in chunks and
+    refuses anything past `limit` (reads limit+1 to detect overflow).
+    """
+    try:
+        declared = int(resp.headers.get("Content-Length") or 0)
+    except (ValueError, TypeError):
+        declared = 0
+    if declared > limit:
+        raise RuntimeError("dashboard response too large (%d bytes)" % declared)
+    total = 0
+    chunks = []
+    while True:
+        chunk = resp.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise RuntimeError("dashboard response exceeds %d byte limit" % limit)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def build_opener(base):
     jar = http.cookiejar.MozillaCookieJar(COOKIE_PATH)
     try:
         if os.path.exists(COOKIE_PATH):
             jar.load(ignore_discard=True, ignore_expires=True)
     except OSError:
         pass
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    origin = urllib.parse.urlparse(base)
+    redirects = SameOriginRedirectHandler((origin.scheme, origin.netloc))
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(jar), redirects
+    )
     opener.addheaders = [("User-Agent", "omarchy-9router-monitor/1.0")]
     return opener, jar
 
@@ -69,11 +131,11 @@ def get(opener, base, path):
     url = base.rstrip("/") + path
     try:
         with opener.open(url, timeout=TIMEOUT) as resp:
-            return resp.status, resp.read()
+            return resp.status, read_bounded(resp)
     except urllib.error.HTTPError as exc:
         try:
-            body = exc.read()
-        except OSError:
+            body = read_bounded(exc)
+        except (OSError, RuntimeError):
             body = b""
         return exc.code, body
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -91,13 +153,13 @@ def do_login(opener, jar, base, password):
         with opener.open(request, timeout=TIMEOUT) as resp:
             status = resp.status
             try:
-                body = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+                body = json.loads(read_bounded(resp).decode("utf-8", "replace") or "{}")
             except ValueError:
                 body = {}
     except urllib.error.HTTPError as exc:
         try:
-            raw = exc.read().decode("utf-8", "replace")
-        except OSError:
+            raw = read_bounded(exc).decode("utf-8", "replace")
+        except (OSError, RuntimeError):
             raw = ""
         try:
             body = json.loads(raw or "{}")
@@ -143,22 +205,32 @@ def parse_sse_first_data(raw):
     return None
 
 
+def clip(value, limit=MAX_TEXT_CHARS):
+    return str(value or "").strip()[:limit]
+
+
 def norm_active(items):
     out = []
     if not isinstance(items, list):
         return out
     for entry in items:
+        if len(out) >= MAX_ACTIVE_ENTRIES:
+            break
         if not isinstance(entry, dict):
             continue
-        model = str(entry.get("model") or "").strip()
+        model = clip(entry.get("model"))
         if not model:
             continue
+        try:
+            count = int(entry.get("count") or 1)
+        except (ValueError, TypeError):
+            count = 1
         out.append(
             {
                 "model": model,
-                "provider": str(entry.get("provider") or "").strip(),
-                "account": str(entry.get("account") or "").strip(),
-                "count": int(entry.get("count") or 1),
+                "provider": clip(entry.get("provider")),
+                "account": clip(entry.get("account")),
+                "count": max(1, min(99, count)),
             }
         )
     return out
@@ -169,34 +241,71 @@ def norm_recent(items):
     if not isinstance(items, list):
         return out
     for entry in items:
+        if len(out) >= MAX_RECENT_ENTRIES:
+            break
         if not isinstance(entry, dict):
             continue
-        model = str(entry.get("model") or "").strip()
+        model = clip(entry.get("model"))
         if not model:
             continue
         out.append(
             {
                 "model": model,
-                "provider": str(entry.get("provider") or "").strip(),
-                "timestamp": str(entry.get("timestamp") or ""),
-                "status": str(entry.get("status") or "ok"),
+                "provider": clip(entry.get("provider")),
+                "timestamp": clip(entry.get("timestamp"), 64),
+                "status": clip(entry.get("status"), 32) or "ok",
             }
         )
-        if len(out) >= 20:
-            break
     return out
+
+
+def sse_read1(resp):
+    """One raw read of whatever the SSE socket has, bounded, or None on end.
+
+    read1() returns as soon as any bytes land, so event latency tracks the
+    server's push instead of waiting to fill a buffer. A socket timeout (the
+    stall guard) and clean EOF both read as None.
+    """
+    try:
+        read = getattr(resp, "read1", None) or resp.read
+        return read(65536)
+    except (TimeoutError, OSError):
+        return None
+
+
+def sse_next_payload(buf):
+    """Split the next complete SSE data-payload dict out of `buf`.
+
+    Returns (stats_or_None, remaining_buf). SSE data lines can be tens of KB
+    (a full stats snapshot), so the byte buffer splits on newlines
+    explicitly — readline(size) would silently split an oversized line and
+    corrupt the JSON. Comment lines (": ping") and unparseable payloads are
+    skipped.
+    """
+    while b"\n" in buf:
+        raw, buf = buf.split(b"\n", 1)
+        line = raw.decode("utf-8", "replace").strip()
+        if not line.startswith("data:"):
+            continue
+        try:
+            stats = json.loads(line[len("data:"):].strip())
+        except ValueError:
+            continue
+        if isinstance(stats, dict):
+            return stats, buf
+    return None, buf
 
 
 def get_stream_first(opener, base, path):
     """Read just the first SSE data event, then hang up.
 
-    /api/usage/stream never ends (25s keepalives), so a plain resp.read()
-    would block until the socket times out. Read incrementally and stop at
-    the first complete data payload. Returns (status, dict|None).
+    /api/usage/stream never ends (25s keepalives), so this reads until one
+    complete data payload lands and drops the connection. Returns
+    (status, dict|None).
     """
     url = base.rstrip("/") + path
     try:
-        resp = opener.open(url, timeout=TIMEOUT)
+        resp = opener.open(url, timeout=STREAM_TIMEOUT)
     except urllib.error.HTTPError as exc:
         return exc.code, None
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -205,22 +314,16 @@ def get_stream_first(opener, base, path):
         if resp.status == 401:
             return 401, None
         buf = b""
-        for _ in range(200):
-            try:
-                chunk = resp.read(65536)
-            except (TimeoutError, OSError):
-                break
+        while True:
+            stats, buf = sse_next_payload(buf)
+            if stats is not None:
+                return resp.status, stats
+            chunk = sse_read1(resp)
             if not chunk:
-                break
+                return resp.status, None
             buf += chunk
-            if len(buf) > 1048576:
-                break
-            if b"\n\n" in buf:
-                stats = parse_sse_first_data(buf)
-                if isinstance(stats, dict):
-                    return 200, stats
-        stats = parse_sse_first_data(buf)
-        return 200, stats if isinstance(stats, dict) else None
+            if len(buf) > MAX_RESPONSE_BYTES:
+                return resp.status, None
     finally:
         try:
             resp.close()
@@ -300,15 +403,16 @@ def emit_snapshot(stats):
 def run_stream(opener, base, max_seconds):
     """Follow /api/usage/stream live, one JSON snapshot per SSE data event.
 
-    The server pushes immediately on every request start/finish, so activity
-    shows up in the bar instantly instead of at poll boundaries. Stalls (no
-    bytes for 40s) or clean EOF return non-zero so the caller falls back to
-    one-shot polling. Exits 2 on HTTP 401 (session expired), 1 on
-    stalls/network errors, 0 on clean end or --max-seconds expiry.
+    The server pushes immediately on every request start/finish (plus a
+    ": ping" comment every 25s), so activity shows up in the bar instantly
+    instead of at poll boundaries. STREAM_TIMEOUT sits wider than the
+    keepalive, so only a genuinely dead connection reads as a stall. Exits 2
+    on HTTP 401 (session expired), 1 on stalls/network errors, 0 on clean
+    end or --max-seconds expiry.
     """
     url = base.rstrip("/") + "/api/usage/stream"
     try:
-        resp = opener.open(url, timeout=TIMEOUT)
+        resp = opener.open(url, timeout=STREAM_TIMEOUT)
     except urllib.error.HTTPError as exc:
         return 2 if exc.code == 401 else 1
     except (urllib.error.URLError, TimeoutError, OSError):
@@ -319,51 +423,24 @@ def run_stream(opener, base, max_seconds):
         except OSError:
             pass
         return 2
-    try:
-        sock = resp.fp.raw._sock
-    except AttributeError:
-        sock = None
     deadline = time.monotonic() + max_seconds if max_seconds > 0 else None
     buf = b""
     try:
-        import select
-
         while True:
             if deadline is not None and time.monotonic() >= deadline:
                 return 0
-            if sock is not None:
-                wait = 40.0
-                if deadline is not None:
-                    wait = max(0.5, min(40.0, deadline - time.monotonic()))
-                try:
-                    ready, _, _ = select.select([sock], [], [], wait)
-                except (OSError, ValueError):
-                    return 1
-                if not ready:
-                    return 1
-            try:
-                chunk = resp.read(65536)
-            except (TimeoutError, OSError):
-                return 1
+            # Drain every complete payload already buffered before reading
+            # more — a burst of events emits back to back.
+            stats, buf = sse_next_payload(buf)
+            if stats is not None:
+                emit_snapshot(stats)
+                continue
+            chunk = sse_read1(resp)
             if not chunk:
                 return 0
             buf += chunk
-            if len(buf) > 1048576:
-                buf = buf[-524288:]
-            while b"\n\n" in buf:
-                raw, buf = buf.split(b"\n\n", 1)
-                text = raw.decode("utf-8", "replace")
-                for line in text.splitlines():
-                    line = line.strip()
-                    if not line.startswith("data:"):
-                        continue
-                    try:
-                        stats = json.loads(line[len("data:"):].strip())
-                    except ValueError:
-                        continue
-                    if isinstance(stats, dict):
-                        emit_snapshot(stats)
-                    break
+            if len(buf) > MAX_RESPONSE_BYTES:
+                return 1
     finally:
         try:
             resp.close()
@@ -395,7 +472,7 @@ def main(argv):
         fail("invalid dashboard URL")
         return 0
 
-    opener, jar = build_opener()
+    opener, jar = build_opener(base)
     if login_with_stdin:
         # One line only: the caller keeps the pipe open after writing, so a
         # read-until-EOF here would hang forever.

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "jhonoryza.9router",
   "name": "9Router Monitor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "jhonoryza",
   "license": "MIT",
   "description": "Navbar pill for the 9Router dashboard: pulses while a model request is in flight, shows the last-used model when idle, and handles dashboard login (with a password prompt UI) when the session expires.",

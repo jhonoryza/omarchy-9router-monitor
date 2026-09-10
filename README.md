@@ -85,3 +85,14 @@ secret-tool clear service omarchy-9router account dashboard-password  # remember
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Security notes
+
+- All dashboard responses are hard-capped (512 KiB, streamed with an
+  overflow check) so a faulty or compromised server cannot exhaust the
+  shell's memory. Collection sizes and string lengths are capped before
+  anything reaches QML state.
+- Redirects are restricted to the configured dashboard origin; the cookie
+  jar never follows a redirect off-origin.
+- The dashboard password is sent over process stdin (never argv) and only
+  stored in the login keyring when remember-password is on.
