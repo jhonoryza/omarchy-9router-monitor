@@ -76,7 +76,9 @@ secret-tool clear service omarchy-9router account dashboard-password  # remember
 
 | Key                | Default                 | Meaning                                              |
 |--------------------|-------------------------|------------------------------------------------------|
-| `baseUrl`          | `http://localhost:20128`| Dashboard scheme + host + port, no trailing slash    |
+| `dashboardHost`    | `localhost`             | Dashboard host — editable from the panel (CONNECTION section) |
+| `dashboardPort`    | `20128`                 | Dashboard listening port — editable from the panel   |
+| `baseUrl`          | `http://localhost:20128`| Full URL, legacy fallback when host/port are empty   |
 | `refreshSeconds`   | `5`                     | Heartbeat poll interval (stream carries live updates)|
 | `showModelLabel`   | `true`                  | `false` leaves only the status dot                   |
 | `pillWidth`        | `200`                   | Fixed pill width (120-400); long names marquee inside |

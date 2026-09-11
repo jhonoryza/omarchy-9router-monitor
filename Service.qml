@@ -79,6 +79,30 @@ Item {
 
   function emitChanged() { root.dataChanged() }
 
+  // Switching dashboards: drop the old session context, point at the new
+  // URL, and reconnect from scratch. Cookies are per-origin, so the stored
+  // jar must go — otherwise the next fetch would report "expired" against
+  // the wrong dashboard before settling.
+  function setConnection(baseUrl) {
+    var next = String(baseUrl || "").trim().replace(/\/+$/, "")
+    if (next === "" || next === root.baseUrl) return
+    root.stopStream()
+    if (fetchProc.running) fetchProc.running = false
+    if (loginProc.running) loginProc.running = false
+    root.clearCookies()
+    root.auth = "unknown"
+    root.errorText = ""
+    root.loginError = ""
+    root.activeRequests = []
+    root.recentRequests = []
+    root.seenPrimed = false
+    root.lastSeenKey = ""
+    root.lastArrivalMs = 0
+    root.baseUrl = next
+    root.emitChanged()
+    Qt.callLater(root.refresh)
+  }
+
   function applySnapshot(raw) {
     var text = String(raw || "").trim()
     if (!text) {

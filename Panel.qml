@@ -21,6 +21,10 @@ Panel {
   property bool openedFromHotkey: false
   property string draftPassword: ""
   property bool showPassword: false
+  property string draftHost: "localhost"
+  property string draftPort: "20128"
+  property string connectionError: ""
+  property string connectionStatus: ""
 
   function open() {
     openedFromHotkey = false
@@ -83,13 +87,112 @@ Panel {
     if (passwordField) passwordField.text = ""
   }
 
+  function syncConnectionDraft() {
+    var host = "localhost"
+    var port = "20128"
+    var parsed = root.parseBaseUrl(root.baseUrl)
+    if (parsed) {
+      if (parsed.host !== "") host = parsed.host
+      if (parsed.port !== "") port = parsed.port
+    }
+    if (hostWidget && hostWidget.setting) {
+      var h = hostWidget.setting("dashboardHost", "")
+      var p = hostWidget.setting("dashboardPort", "")
+      if (String(h === undefined || h === null ? "" : h).trim() !== "") host = String(h).trim()
+      if (String(p === undefined || p === null ? "" : p).trim() !== "") port = String(p).trim()
+    }
+    root.draftHost = host
+    root.draftPort = port
+    root.connectionError = ""
+    if (hostField) hostField.text = host
+    if (portField) portField.text = port
+  }
+
+  function parseBaseUrl(url) {
+    var s = String(url || "").trim().replace(/\/+$/, "")
+    var m = s.match(/^(https?):\/\/([^\/:]+)(?::(\d+))?$/)
+    if (!m) return null
+    return { scheme: m[1], host: m[2], port: m[3] || "" }
+  }
+
+  function serviceOrLookup() {
+    if (root.service) return root.service
+    // The panel may open before the widget finishes binding — resolve the
+    // service directly through the shell instead of waiting.
+    var candidates = []
+    if (hostWidget && hostWidget.pluginId) candidates.push(hostWidget.pluginId)
+    if (hostWidget && hostWidget.moduleName) candidates.push(hostWidget.moduleName)
+    candidates.push("vm.9router", "jhonoryza.9router")
+    var shell = root.bar && root.bar.shell ? root.bar.shell : null
+    if (shell && typeof shell.serviceFor === "function") {
+      for (var i = 0; i < candidates.length; i++) {
+        if (!candidates[i]) continue
+        var s = shell.serviceFor(candidates[i])
+        if (s) {
+          root.service = s
+          return s
+        }
+      }
+    }
+    if (hostWidget && hostWidget.svc) {
+      root.service = hostWidget.svc
+      return hostWidget.svc
+    }
+    return null
+  }
+
+  function applyConnection() {
+    var host = String(root.draftHost || "").trim()
+    var portText = String(root.draftPort || "").trim()
+    if (host === "" || /[\s\/:@]/.test(host)) {
+      root.connectionError = "Enter a valid host (IP or hostname, no scheme or path)."
+      return
+    }
+    if (!/^\d+$/.test(portText) || parseInt(portText, 10) < 1 || parseInt(portText, 10) > 65535) {
+      root.connectionError = "Port must be a number 1-65535."
+      return
+    }
+    var port = parseInt(portText, 10)
+    var scheme = "http"
+    var parsed = root.parseBaseUrl(root.baseUrl)
+    if (parsed) scheme = parsed.scheme
+    var baseUrl = scheme + "://" + host + ":" + port
+    if (baseUrl === root.baseUrl) {
+      root.connectionError = ""
+      return
+    }
+    root.connectionError = ""
+    root.connectionStatus = "Connecting to " + baseUrl + "…"
+    // Persist first so the new URL survives restarts, then drive the live
+    // service directly — pushSettings only re-fires when settings change.
+    if (hostWidget && typeof hostWidget.persistConnection === "function") {
+      hostWidget.persistConnection(host, port, baseUrl)
+    }
+    var svc = root.serviceOrLookup()
+    if (svc && typeof svc.setConnection === "function") {
+      svc.setConnection(baseUrl)
+    } else if (svc) {
+      svc.baseUrl = baseUrl
+      root.refresh()
+    } else {
+      root.connectionError = "Service not ready — reopen the panel and try again."
+      root.connectionStatus = ""
+    }
+  }
+
   onExpiredChanged: {
     if (root.expired && root.opened) Qt.callLater(focusPasswordIfNeeded)
     if (!root.expired) clearDraft()
   }
 
+  onBaseUrlChanged: {
+    root.connectionStatus = ""
+    if (root.opened) Qt.callLater(syncConnectionDraft)
+  }
+
   onOpenedChanged: {
     if (root.opened) {
+      syncConnectionDraft()
       Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
       Qt.callLater(focusPasswordIfNeeded)
     } else {
@@ -436,6 +539,103 @@ Panel {
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.bodySmall
             font.italic: true
+          }
+
+          // ---- connection -------------------------------------------------------
+          Column {
+            width: parent.width
+            spacing: Style.space(8)
+
+            PanelSectionHeader {
+              width: parent.width
+              text: "CONNECTION"
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Column {
+                width: (parent.width - Style.space(8)) * 0.62
+                spacing: Style.space(4)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Host"
+                  color: root.bar ? Qt.darker(root.bar.foreground, 1.4) : Color.muted
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
+
+                TextField {
+                  id: hostField
+                  width: parent.width
+                  placeholderText: "localhost"
+                  foreground: root.bar ? root.bar.foreground : Color.foreground
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  text: root.draftHost
+                  onTextChanged: if (text !== root.draftHost) root.draftHost = text
+                  onAccepted: root.applyConnection()
+                  Keys.onEscapePressed: root.close()
+                }
+              }
+
+              Column {
+                width: (parent.width - Style.space(8)) * 0.38
+                spacing: Style.space(4)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Port"
+                  color: root.bar ? Qt.darker(root.bar.foreground, 1.4) : Color.muted
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
+
+                TextField {
+                  id: portField
+                  width: parent.width
+                  placeholderText: "20128"
+                  inputMethodHints: Qt.ImhDigitsOnly
+                  foreground: root.bar ? root.bar.foreground : Color.foreground
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  text: root.draftPort
+                  onTextChanged: if (text !== root.draftPort) root.draftPort = text
+                  onAccepted: root.applyConnection()
+                  Keys.onEscapePressed: root.close()
+                }
+              }
+            }
+
+            Text {
+              visible: root.connectionError !== ""
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: root.connectionError
+              color: Color.urgent
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Text {
+              visible: root.connectionStatus !== "" && root.connectionError === ""
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: root.connectionStatus
+              color: root.bar ? Qt.darker(root.bar.foreground, 1.4) : Color.muted
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              font.italic: true
+            }
+
+            Button {
+              text: "Apply & reconnect"
+              foreground: root.bar ? root.bar.foreground : Color.foreground
+              enabled: root.draftHost.trim() !== "" && root.draftPort.trim() !== ""
+              onClicked: root.applyConnection()
+            }
           }
 
           // ---- footer actions ---------------------------------------------------

@@ -20,7 +20,10 @@ BarWidget {
   id: root
   moduleName: "jhonoryza.9router"
 
-  readonly property string pluginId: "jhonoryza.9router"
+  // Resolved at runtime from moduleName — the bar overwrites moduleName with
+  // the shell.json entry id (e.g. vm.9router), and the service registry is
+  // keyed by that same installed id.
+  readonly property string pluginId: root.moduleName
   readonly property bool showLabel: setting("showModelLabel", true) === true
     || String(setting("showModelLabel", "true")) === "true"
   // Fixed pill width in spacing units so the bar never shifts when the
@@ -35,20 +38,76 @@ BarWidget {
   function bindService() {
     if (root.svc) {
       pushSettings()
-      return
+      return true
     }
     var host = root.bar && root.bar.shell ? root.bar.shell : null
-    if (!host || typeof host.serviceFor !== "function") return
-    var s = host.serviceFor(root.pluginId)
-    if (!s) return
-    root.svc = s
-    pushSettings()
-    injectPanel()
+    if (!host || typeof host.serviceFor !== "function") return false
+    // The installed id (shell.json entry) is the registry key; fall back to
+    // the upstream id for checkouts still installed under the old name.
+    var candidates = [root.pluginId, "jhonoryza.9router", "vm.9router"]
+    for (var i = 0; i < candidates.length; i++) {
+      var s = host.serviceFor(candidates[i])
+      if (s) {
+        root.svc = s
+        pushSettings()
+        injectPanel()
+        bindRetry.stop()
+        return true
+      }
+    }
+    // Service is created async after the manifest scan — retry instead of
+    // staying unbound forever.
+    bindRetry.restart()
+    return false
+  }
+
+  function defaultBaseUrl() {
+    return "http://localhost:20128"
+  }
+
+  function defaultHost() { return "localhost" }
+  function defaultPort() { return 20128 }
+
+  // Host/port are the editable connection fields in the panel; baseUrl stays
+  // as the legacy fallback so existing shell.json entries keep working.
+  function parseBaseUrl(url) {
+    var s = String(url || "").trim().replace(/\/+$/, "")
+    var m = s.match(/^(https?):\/\/([^\/:]+)(?::(\d+))?$/)
+    if (!m) return null
+    return { scheme: m[1], host: m[2], port: m[3] || "" }
+  }
+
+  function resolveBaseUrl() {
+    var host = String(setting("dashboardHost", defaultHost()) || "").trim()
+    if (host === "") host = defaultHost()
+    var portRaw = setting("dashboardPort", defaultPort())
+    var port = String(portRaw === undefined || portRaw === null || portRaw === "" ? defaultPort() : portRaw).trim()
+    if (host !== "" && port !== "") {
+      var scheme = "http"
+      var legacy = parseBaseUrl(setting("baseUrl", ""))
+      if (legacy) scheme = legacy.scheme
+      return scheme + "://" + host + ":" + port
+    }
+    return String(setting("baseUrl", defaultBaseUrl()) || defaultBaseUrl())
+  }
+
+  function persistConnection(host, port, baseUrl) {
+    if (!root.bar || !root.bar.shell || typeof root.bar.shell.updateEntryInline !== "function") return
+    var entry = { id: root.moduleName }
+    var current = root.settings || {}
+    for (var k in current) if (k !== "id") entry[k] = current[k]
+    entry["dashboardHost"] = host
+    entry["dashboardPort"] = port
+    entry["baseUrl"] = baseUrl
+    root.settings = entry
+    root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
 
   function pushSettings() {
     if (!root.svc) return
-    root.svc.baseUrl = String(setting("baseUrl", "http://localhost:20128") || "http://localhost:20128")
+    var next = root.resolveBaseUrl()
+    if (next !== root.svc.baseUrl && typeof root.svc.setConnection === "function") root.svc.setConnection(next)
+    else root.svc.baseUrl = next
     var secs = parseInt(setting("refreshSeconds", 5), 10)
     root.svc.refreshSeconds = isFinite(secs) ? Math.max(2, Math.min(120, secs)) : 5
     var remember = setting("rememberPassword", true)
@@ -76,7 +135,7 @@ BarWidget {
 
   function openDashboard() {
     if (root.svc && typeof root.svc.openDashboard === "function") root.svc.openDashboard()
-    else Qt.openUrlExternally(String(setting("baseUrl", "http://localhost:20128")) + "/dashboard/usage")
+    else Qt.openUrlExternally(root.resolveBaseUrl() + "/dashboard/usage")
   }
 
   // Shape contract for shell.summon/hide/toggle routing.
@@ -241,6 +300,20 @@ BarWidget {
     running: root.busy
     repeat: true
     onTriggered: root.eqStep()
+  }
+
+  // Retry binding until the async service creation catches up. Stops itself
+  // on success; also re-fires injectPanel so the panel gets the service even
+  // if it loaded first.
+  Timer {
+    id: bindRetry
+    interval: 2000
+    repeat: true
+    running: root.svc === null
+    onTriggered: {
+      if (root.svc) { stop(); return }
+      root.bindService()
+    }
   }
 
   Loader {
