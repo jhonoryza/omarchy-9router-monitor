@@ -59,9 +59,17 @@ Panel {
     return false
   }
 
+  // Cosmetic only (hotkey-summon hover state) — must never throw: the
+  // shell hands third-party panels a facade where this property is
+  // readonly, and a throw here used to abort close() before hide() ran.
   function setCenterHoverRevealSuppressed(value) {
-    if (root.bar && "centerHoverRevealSuppressed" in root.bar)
-      root.bar.centerHoverRevealSuppressed = value
+    try {
+      if (root.bar && typeof root.bar.setCenterHoverRevealSuppressed === "function")
+        root.bar.setCenterHoverRevealSuppressed(value)
+      else if (root.bar && "centerHoverRevealSuppressed" in root.bar)
+        root.bar.centerHoverRevealSuppressed = value
+    } catch (e) {
+    }
   }
 
   // ---- service read-outs (null-safe until the widget injects it) ------------

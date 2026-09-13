@@ -413,6 +413,10 @@ Item {
       if (keyringProc.mode === "store") {
         write(keyringProc.pendingSecret + "\n")
         keyringProc.pendingSecret = ""
+        // secret-tool store waits for EOF on stdin; leaving the pipe open
+        // wedges this Process forever (and blocks tryStoredLogin/forgetSecret).
+        // Cosmetic-only path: never let it throw.
+        try { keyringProc.stdinEnabled = false } catch (e) {}
       }
     }
     stdout: StdioCollector {
